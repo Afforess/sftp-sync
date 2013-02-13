@@ -1,10 +1,17 @@
 package com.afforess.sftp.sync;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.BasicFileAttributeView;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.util.Vector;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.io.FileUtils;
 
@@ -52,7 +59,7 @@ public class TransferThread extends Thread {
 	}
 
 	@SuppressWarnings("unchecked")
-	private void copyRemoteFolder(ChannelSftp channel, File localDir) throws SftpException, FileNotFoundException {
+	private void copyRemoteFolder(ChannelSftp channel, File localDir) throws SftpException, IOException {
 		if (entry.isSyncDeletions()) {
 			cleanLocal(channel, localDir);
 		}
@@ -77,21 +84,48 @@ public class TransferThread extends Thread {
 			} else {
 				final File localFile = new File(localDir, file.getFilename());
 				final long totalSize = file.getAttrs().getSize();
+				final long aTime = file.getAttrs().getATime();
+				final long mTime = file.getAttrs().getMTime();
+				final long localCTime = getCreatedTime(localFile);
 				long len = localFile.length();
-				if (!localFile.exists()) {
+				if (localCTime != mTime) {
 					this.fileName = localFile.getName();
 					this.monitor = new ProgressMonitor(totalSize);
-					channel.get(file.getFilename(), new FileOutputStream(localFile), monitor);
+					try {
+						channel.get(file.getFilename(), new FileOutputStream(localFile), monitor);
+					} finally {
+						if (localFile.exists()) {
+							localFile.setLastModified(mTime);
+							Path path = Paths.get(localFile.toURI());
+							BasicFileAttributeView att = Files.getFileAttributeView(path, BasicFileAttributeView.class);
+							att.setTimes(FileTime.from(mTime, TimeUnit.SECONDS), FileTime.from(aTime, TimeUnit.SECONDS), FileTime.from(mTime, TimeUnit.SECONDS));
+						}
+					}
 				} else if (localFile.length() != totalSize) {
 					this.fileName = localFile.getName();
 					this.monitor = new ProgressMonitor(totalSize);
-					System.out.println("Resuming, old size: " + len);
-					channel.get(file.getFilename(), new FileOutputStream(localFile, true), monitor, ChannelSftp.RESUME, len);
+					try {
+						channel.get(file.getFilename(), new FileOutputStream(localFile, true), monitor, ChannelSftp.RESUME, len);
+					} finally {
+						localFile.setLastModified(mTime);
+						Path path = Paths.get(localFile.toURI());
+						BasicFileAttributeView att = Files.getFileAttributeView(path, BasicFileAttributeView.class);
+						att.setTimes(FileTime.from(mTime, TimeUnit.SECONDS), FileTime.from(aTime, TimeUnit.SECONDS), FileTime.from(mTime, TimeUnit.SECONDS));
+					}
 				} else {
 					System.out.println(localFile.getName() + " already mirrored");
 				}
 			}
 		}
+	}
+
+	private int getCreatedTime(File file) throws IOException {
+		if (!file.exists()) {
+			return -1;
+		}
+		Path path = Paths.get(file.toURI());
+		BasicFileAttributes att = Files.readAttributes(path, BasicFileAttributes.class);
+		return (int) att.creationTime().to(TimeUnit.SECONDS);
 	}
 
 	private void cleanLocal(ChannelSftp channel, File localDir) throws SftpException {
