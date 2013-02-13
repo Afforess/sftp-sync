@@ -1,4 +1,6 @@
 SFTP-Sync is a tool to sync sftp server directories to your personal computer.
+Sync mode: syncs all files, including file deletions. This keeps a perfect copy of the site, updated in real time.
+Copy mode: copies all files, keeping older files that have been removed. New or changed files will still replace old files.
 
 Credits:
 Live Sync.png, licensed under CC Attribution 3.0 Unported (http://creativecommons.org/licenses/by/3.0/) - http://www.softicons.com/free-icons/designers/dakirby309
