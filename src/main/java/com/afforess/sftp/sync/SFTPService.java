@@ -11,8 +11,6 @@ import java.awt.TrayIcon;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.BufferedInputStream;
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -20,12 +18,12 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -33,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Formatter;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -45,6 +44,7 @@ import javax.swing.UIManager;
 
 import org.apache.bval.jsr303.util.IOUtils;
 
+import com.afforess.sftp.sync.yml.YAMLProcessor;
 import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.Session;
@@ -68,6 +68,7 @@ public class SFTPService {
 	private static final PopupMenu popup = new PopupMenu();
 	private static final AtomicInteger maxConnections = new AtomicInteger(2);
 	private static final AtomicInteger prevConnections = new AtomicInteger(2);
+	private static final AtomicLong pauseTime = new AtomicLong(-1L);
 	public static void main(String[] args) {
 		Logger logger = setupLogger();
 		try {
@@ -92,52 +93,49 @@ public class SFTPService {
 		TrayIcon trayIcon = new TrayIcon(DOWNLOADING_IMAGE, "SFTP Sync", popup);
 		trayIcon.setImageAutoSize(true);
 		tray.add(trayIcon);
-		
+
 		//Start the dl'ing
-		boolean b = true;
-		while(b) {
-			ServerEntry entry;
-			int transfersNeeded = getMaxConnections();
-			int transfersCurrent = 0;
-			Iterator<TransferThread> i = transfers.iterator();
+		while(true) {
+			int maxTransfers = getMaxConnections();
+			int curTransfers = 0;
 			String tooltip = "SFTP Sync";
+			Iterator<TransferThread> i = transfers.iterator();
 			while(i.hasNext()) {
 				TransferThread thread = i.next();
 				if (thread.isFinished()) {
-					if (thread.getException() != null) {
-						thread.getException().printStackTrace();
-					}
-					fullyTransfered.put(thread.getServer(), 100 /*wait 16 min before rechecking */);
+					fullyTransfered.put(thread.getServer(), thread.getServer().getRecheckMinutes() * 60);
 					i.remove();
 				} else {
-					if (transfersNeeded <= 0) {
+					//We have too many active transfers, kill some
+					if (maxTransfers <= 0) {
 						thread.interrupt();
-						Thread.sleep(1);
-						System.out.println("Interrupted: " + thread.isFinished());
 						i.remove();
 					} else {
-						transfersCurrent++;
+						curTransfers++;
 						tooltip += "\n" + thread.getDescription();
-						System.out.println("Status: " + thread.getDescription());
 					}
-					transfersNeeded--;
+					maxTransfers--;
 				}
 			}
 			trayIcon.setToolTip(tooltip);
-			if (transfersNeeded > 0) {
+			//Still have available connections, find another server to check
+			if (maxTransfers > 0) {
 				synchronized(servers) {
 				loop: for (int index = 0; index < servers.size(); index++) {
-						entry = servers.get(index);
+						ServerEntry entry = servers.get(index);
+						//Check to see if the recheck period has expired
 						int skips = fullyTransfered.containsKey(entry) ? fullyTransfered.get(entry) : 0;
 						if (skips > 0) {
 							fullyTransfered.put(entry, skips - 1);
 							continue;
 						}
+						//Already have an open connection
 						for (TransferThread t : transfers) {
 							if (t.getServer().equals(entry)) {
 								continue loop;
 							}
 						}
+						//Open SFTP connection
 						try {
 							JSch jsch = new JSch();
 							Session session = jsch.getSession(entry.getUsername(), entry.getServerHostname(), entry.getPort());
@@ -154,12 +152,12 @@ public class SFTPService {
 							TransferThread thread = new TransferThread(entry, channel, localDir);
 							transfers.add(thread);
 							thread.start();
-							transfersCurrent++;
+							curTransfers++;
 						} catch (Exception e) {
 							e.printStackTrace();
 						}
-						transfersNeeded--;
-						if (transfersNeeded <= 0) {
+						maxTransfers--;
+						if (maxTransfers <= 0) {
 							break;
 						}
 					}
@@ -167,13 +165,19 @@ public class SFTPService {
 			}
 			if (getMaxConnections() == 0) {
 				trayIcon.setImage(PAUSED_IMAGE);
-			} else if (transfersCurrent > 0) {
+			} else if (curTransfers > 0) {
 				trayIcon.setImage(DOWNLOADING_IMAGE);
 			} else {
 				trayIcon.setImage(IDLE_IMAGE);
 			}
 			fileHandler.flush();
-			Thread.sleep(10000);
+			Thread.sleep(1000);
+			long pause = pauseTime.get();
+			if (pause > 0) {
+				if (pauseTime.getAndSet(pause - 1000) <= 1000) {
+					maxConnections.set(prevConnections.get());
+				}
+			}
 		}
 	}
 
@@ -252,6 +256,10 @@ public class SFTPService {
 		setupTray();
 	}
 
+	public static void setPauseTime(long time) {
+		pauseTime.set(time);
+	}
+
 	private static void setupTray() {
 		popup.removeAll();
 
@@ -260,9 +268,29 @@ public class SFTPService {
 			resume.addActionListener(new MaxConnectionsListener(prevConnections.get()));
 			popup.add(resume);
 		} else {
+			Menu pauseMenu = new Menu("Pause");
+			
 			MenuItem pause = new MenuItem("Pause");
 			pause.addActionListener(new MaxConnectionsListener(0));
-			popup.add(pause);
+			pauseMenu.add(pause);
+			
+			MenuItem pause1 = new MenuItem("Pause - 1 hour");
+			pause1.addActionListener(new MaxConnectionsListener(0, 1 * 60 * 60 * 1000L));
+			pauseMenu.add(pause1);
+			
+			MenuItem pause3 = new MenuItem("Pause - 3 hours");
+			pause3.addActionListener(new MaxConnectionsListener(0, 3 * 60 * 60 * 1000L));
+			pauseMenu.add(pause3);
+			
+			MenuItem pause6 = new MenuItem("Pause - 6 hours");
+			pause6.addActionListener(new MaxConnectionsListener(0, 6 * 60 * 60 * 1000L));
+			pauseMenu.add(pause6);
+			
+			MenuItem pause12 = new MenuItem("Pause - 12 hours");
+			pause12.addActionListener(new MaxConnectionsListener(0, 12 * 60 * 60 * 1000L));
+			pauseMenu.add(pause12);
+
+			popup.add(pauseMenu);
 		}
 
 		Menu serverList = new Menu("Server List");
@@ -312,70 +340,50 @@ public class SFTPService {
 	}
 
 	private static void saveServers() {
-		BufferedWriter bw = null;
-		try {
-			File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.txt");
-			PrintWriter writer = new PrintWriter(serverList);
-			bw = new BufferedWriter(writer);
-			for (ServerEntry entry : servers) {
-				//TODO encrypt?
-				bw.append(entry.getAlias());
-				bw.append("\n");
-				bw.append(entry.getServerHostname());
-				bw.append("\n");
-				bw.append(String.valueOf(entry.getPort()));
-				bw.append("\n");
-				bw.append(entry.getUsername());
-				bw.append("\n");
-				bw.append(entry.getPassword());
-				bw.append("\n");
-				bw.append(entry.getRemoteDir());
-				bw.append("\n");
-				bw.append(entry.getLocalDir());
-				bw.append("\n");
-				bw.append(Boolean.toString(entry.isSyncDeletions()));
-				bw.append("\n");
-			}
-		} catch (IOException e) {
-			e.printStackTrace();
-		} finally {
-			IOUtils.closeQuietly(bw);
+		File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.yml");
+		YAMLProcessor yml = new YAMLProcessor(serverList, false);
+		
+		List<String> serverAliases = new ArrayList<String>();
+		for (ServerEntry entry : servers) {
+			serverAliases.add(entry.getAlias());
 		}
+		yml.setProperty("servers", serverAliases);
+		for (ServerEntry entry : servers) {
+			final String alias = entry.getAlias();
+			yml.setProperty("server." + alias + ".host", entry.getServerHostname());
+			yml.setProperty("server." + alias + ".port", entry.getPort());
+			yml.setProperty("server." + alias + ".user", entry.getUsername());
+			yml.setProperty("server." + alias + ".pass", entry.getPassword());
+			yml.setProperty("server." + alias + ".remote", entry.getRemoteDir());
+			yml.setProperty("server." + alias + ".local", entry.getLocalDir());
+			yml.setProperty("server." + alias + ".sync", entry.isSyncDeletions());
+			yml.setProperty("server." + alias + ".cooldown", entry.getRecheckMinutes());
+		}
+		
+		yml.save();
 	}
 
 	private static void loadServers() {
-		BufferedReader br = null;
+		File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.yml");
+		YAMLProcessor yml = new YAMLProcessor(serverList, false);
 		try {
-			File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.txt");
-			if (!serverList.exists()) {
-				return;
-			}
-			br = new BufferedReader(new InputStreamReader(new FileInputStream(serverList)));
-			String line;
-			int row = 0;
-			ServerEntry entry = new ServerEntry();
-			while((line = br.readLine()) != null) {
-				switch(row) {
-					case 0: entry.setAlias(line); break;
-					case 1: entry.setServerHostname(line); break;
-					case 2: entry.setPort(Integer.parseInt(line)); break;
-					case 3: entry.setUsername(line); break;
-					case 4: entry.setPassword(line); break;
-					case 5: entry.setRemoteDir(line); break;
-					case 6: entry.setLocalDir(line); break;
-					case 7: entry.setSyncDeletions(Boolean.valueOf(line));
-						servers.add(entry);
-						entry = new ServerEntry();
-						row = -1;
-						break;
-					default: throw new IllegalStateException("Row: " + row);
-				}
-				row++;
+			yml.load();
+			List<String> aliases = yml.getStringList("servers", Collections.<String>emptyList());
+			for (String alias : aliases) {
+				ServerEntry server = new ServerEntry();
+				server.setAlias(alias);
+				server.setServerHostname(yml.getString("server." + alias + ".host"));
+				server.setPort(yml.getInt("server." + alias + ".port"));
+				server.setUsername(yml.getString("server." + alias + ".user"));
+				server.setPassword(yml.getString("server." + alias + ".pass"));
+				server.setRemoteDir(yml.getString("server." + alias + ".remote"));
+				server.setLocalDir(yml.getString("server." + alias + ".local"));
+				server.setSyncDeletions(yml.getBoolean("server." + alias + ".sync", false));
+				server.setRecheckMinutes(yml.getInt("server." + alias + ".cooldown"));
+				servers.add(server);
 			}
 		} catch (IOException e) {
 			e.printStackTrace();
-		} finally {
-			IOUtils.closeQuietly(br);
 		}
 	}
 

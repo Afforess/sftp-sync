@@ -35,6 +35,7 @@ public class ServerEntryListener implements ActionListener{
 		defaultEntry = new ServerEntry();
 		defaultEntry.setPort(22);
 		defaultEntry.setRemoteDir(".");
+		defaultEntry.setRecheckMinutes(15);
 		editing = false;
 	}
 
@@ -64,7 +65,7 @@ public class ServerEntryListener implements ActionListener{
 				
 				//Size of form
 				frame.setIconImage(SFTPService.DOWNLOADING_IMAGE);
-				frame.setSize(300, 220);
+				frame.setSize(300, 240);
 				frame.setResizable(false);
 				frame.setVisible(true);
 				

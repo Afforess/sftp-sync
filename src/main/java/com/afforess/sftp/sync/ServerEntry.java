@@ -28,6 +28,9 @@ public class ServerEntry {
 	@UIOrder(8)
 	@UITitle("  Sync deletions?")
 	private boolean syncDeletions;
+	@UIOrder(9)
+	@UITitle("  Recheck Cooldown")
+	private int recheckMinutes;
 
 	public void set(ServerEntry entry) {
 		this.alias = entry.alias;
@@ -38,6 +41,7 @@ public class ServerEntry {
 		this.remoteDir = entry.remoteDir;
 		this.localDir = entry.localDir;
 		this.syncDeletions = entry.syncDeletions;
+		this.recheckMinutes = entry.recheckMinutes;
 	}
 
 	public String getServerHostname() {
@@ -102,5 +106,13 @@ public class ServerEntry {
 
 	public void setSyncDeletions(boolean syncDeletions) {
 		this.syncDeletions = syncDeletions;
+	}
+
+	public int getRecheckMinutes() {
+		return recheckMinutes;
+	}
+
+	public void setRecheckMinutes(int recheckMinutes) {
+		this.recheckMinutes = recheckMinutes;
 	}
 }

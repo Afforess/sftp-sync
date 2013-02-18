@@ -4,7 +4,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.BasicFileAttributeView;
@@ -27,7 +26,6 @@ public class TransferThread extends Thread {
 	private volatile String fileName;
 	private volatile ProgressMonitor monitor;
 	private volatile boolean finished;
-	private volatile Exception ex;
 	public TransferThread(ServerEntry entry, ChannelSftp channel, File dir) {
 		super("SFTP Transfer Thread");
 		this.entry = entry;
@@ -45,17 +43,13 @@ public class TransferThread extends Thread {
 		try {
 			copyRemoteFolder(channel, dir);
 		} catch (Exception e) {
-			this.ex = e;
+			e.printStackTrace();
 		}
 		finished = true;
 	}
-	
+
 	public boolean isFinished() {
 		return finished;
-	}
-
-	public Exception getException() {
-		return ex;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -112,8 +106,6 @@ public class TransferThread extends Thread {
 						BasicFileAttributeView att = Files.getFileAttributeView(path, BasicFileAttributeView.class);
 						att.setTimes(FileTime.from(mTime, TimeUnit.SECONDS), FileTime.from(aTime, TimeUnit.SECONDS), FileTime.from(mTime, TimeUnit.SECONDS));
 					}
-				} else {
-					System.out.println(localFile.getName() + " already mirrored");
 				}
 			}
 		}
