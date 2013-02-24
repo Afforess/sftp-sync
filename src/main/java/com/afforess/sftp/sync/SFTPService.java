@@ -30,6 +30,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Formatter;
@@ -69,6 +70,7 @@ public class SFTPService {
 	private static final AtomicInteger maxConnections = new AtomicInteger(2);
 	private static final AtomicInteger prevConnections = new AtomicInteger(2);
 	private static final AtomicLong pauseTime = new AtomicLong(-1L);
+	private static final AtomicBoolean forceRecheck = new AtomicBoolean(false);
 	public static void main(String[] args) {
 		Logger logger = setupLogger();
 		try {
@@ -96,6 +98,7 @@ public class SFTPService {
 
 		//Start the dl'ing
 		while(true) {
+			final boolean recheck = forceRecheck.get();
 			int maxTransfers = getMaxConnections();
 			int curTransfers = 0;
 			String tooltip = "SFTP Sync";
@@ -125,7 +128,9 @@ public class SFTPService {
 						ServerEntry entry = servers.get(index);
 						//Check to see if the recheck period has expired
 						int skips = fullyTransfered.containsKey(entry) ? fullyTransfered.get(entry) : 0;
-						if (skips > 0) {
+						if (forceRecheck.get()) {
+							fullyTransfered.remove(entry);
+						} else if (skips > 0) {
 							fullyTransfered.put(entry, skips - 1);
 							continue;
 						}
@@ -171,6 +176,9 @@ public class SFTPService {
 				trayIcon.setImage(IDLE_IMAGE);
 			}
 			fileHandler.flush();
+			if (recheck) {
+				forceRecheck.set(false);
+			}
 			Thread.sleep(1000);
 			long pause = pauseTime.get();
 			if (pause > 0) {
@@ -202,6 +210,10 @@ public class SFTPService {
 			saveServers();
 			setupTray();
 		}
+	}
+
+	public static void forceRecheck() {
+		forceRecheck.set(true);
 	}
 
 	private static void loadSettings() {
@@ -268,6 +280,10 @@ public class SFTPService {
 			resume.addActionListener(new MaxConnectionsListener(prevConnections.get()));
 			popup.add(resume);
 		} else {
+			MenuItem recheck = new MenuItem("Force Recheck");
+			recheck.addActionListener(new ForceRecheckListener());
+			popup.add(recheck);
+			
 			Menu pauseMenu = new Menu("Pause");
 			
 			MenuItem pause = new MenuItem("Pause");
