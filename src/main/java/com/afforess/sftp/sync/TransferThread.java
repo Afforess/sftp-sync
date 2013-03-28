@@ -3,6 +3,7 @@ package com.afforess.sftp.sync;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -42,10 +43,16 @@ public class TransferThread extends Thread {
 	public void run() {
 		try {
 			copyRemoteFolder(channel, dir);
+		} catch (InterruptedIOException e) {
+			return;
 		} catch (Exception e) {
 			e.printStackTrace();
+		} finally {
+			try {
+				channel.disconnect();
+			} catch (Exception ignore) { }
+			finished = true;
 		}
-		finished = true;
 	}
 
 	public boolean isFinished() {

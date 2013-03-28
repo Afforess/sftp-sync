@@ -21,6 +21,9 @@ import java.io.InputStream;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.UnknownHostException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -158,12 +161,17 @@ public class SFTPService {
 							transfers.add(thread);
 							thread.start();
 							curTransfers++;
+							maxTransfers--;
+							if (maxTransfers <= 0) {
+								break;
+							}
 						} catch (Exception e) {
-							e.printStackTrace();
-						}
-						maxTransfers--;
-						if (maxTransfers <= 0) {
-							break;
+							if (e.getCause() instanceof ConnectException || e.getCause() instanceof UnknownHostException || e.getCause() instanceof NoRouteToHostException) {
+								logger.warning("No connection to " + entry.getServerHostname() + ":" + entry.getPort() + ", retry in 60 seconds");
+								fullyTransfered.put(entry, 60);
+							} else {
+								e.printStackTrace();
+							}
 						}
 					}
 				}
@@ -184,6 +192,7 @@ public class SFTPService {
 			if (pause > 0) {
 				if (pauseTime.getAndSet(pause - 1000) <= 1000) {
 					maxConnections.set(prevConnections.get());
+					setupTray();
 				}
 			}
 		}
