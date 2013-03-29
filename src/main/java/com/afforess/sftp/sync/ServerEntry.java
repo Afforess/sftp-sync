@@ -26,8 +26,8 @@ public class ServerEntry {
 	@UITitle("  Local Directory")
 	private String localDir;
 	@UIOrder(8)
-	@UITitle("  Sync deletions?")
-	private boolean syncDeletions;
+	@UITitle("  Sync Mode")
+	private int syncMode;
 	@UIOrder(9)
 	@UITitle("  Recheck Cooldown")
 	private int recheckMinutes;
@@ -40,7 +40,7 @@ public class ServerEntry {
 		this.password = entry.password;
 		this.remoteDir = entry.remoteDir;
 		this.localDir = entry.localDir;
-		this.syncDeletions = entry.syncDeletions;
+		this.syncMode = entry.syncMode;
 		this.recheckMinutes = entry.recheckMinutes;
 	}
 
@@ -100,12 +100,12 @@ public class ServerEntry {
 		this.localDir = localDir;
 	}
 
-	public boolean isSyncDeletions() {
-		return syncDeletions;
+	public int getSyncMode() {
+		return syncMode;
 	}
 
-	public void setSyncDeletions(boolean syncDeletions) {
-		this.syncDeletions = syncDeletions;
+	public void setSyncMode(int syncMode) {
+		this.syncMode = syncMode;
 	}
 
 	public int getRecheckMinutes() {

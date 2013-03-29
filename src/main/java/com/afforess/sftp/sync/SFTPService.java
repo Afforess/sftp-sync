@@ -381,7 +381,7 @@ public class SFTPService {
 			yml.setProperty("server." + alias + ".pass", entry.getPassword());
 			yml.setProperty("server." + alias + ".remote", entry.getRemoteDir());
 			yml.setProperty("server." + alias + ".local", entry.getLocalDir());
-			yml.setProperty("server." + alias + ".sync", entry.isSyncDeletions());
+			yml.setProperty("server." + alias + ".sync", entry.getSyncMode());
 			yml.setProperty("server." + alias + ".cooldown", entry.getRecheckMinutes());
 		}
 		
@@ -403,7 +403,11 @@ public class SFTPService {
 				server.setPassword(yml.getString("server." + alias + ".pass"));
 				server.setRemoteDir(yml.getString("server." + alias + ".remote"));
 				server.setLocalDir(yml.getString("server." + alias + ".local"));
-				server.setSyncDeletions(yml.getBoolean("server." + alias + ".sync", false));
+				if (yml.getBoolean("server." + alias + ".sync") != null) {
+					server.setSyncMode(yml.getBoolean("server." + alias + ".sync") ? 1 : 0);
+				} else {
+					server.setSyncMode(yml.getInt("server." + alias + ".sync", 0));
+				}
 				server.setRecheckMinutes(yml.getInt("server." + alias + ".cooldown"));
 				servers.add(server);
 			}

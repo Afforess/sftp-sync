@@ -1,6 +1,7 @@
 package com.afforess.sftp.sync;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -14,6 +15,7 @@ import java.util.Vector;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
 
 import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.SftpException;
@@ -61,7 +63,12 @@ public class TransferThread extends Thread {
 
 	@SuppressWarnings("unchecked")
 	private void copyRemoteFolder(ChannelSftp channel, File localDir) throws SftpException, IOException {
-		if (entry.isSyncDeletions()) {
+		SyncMode mode = SyncMode.getModeById(entry.getSyncMode());
+		if (mode == SyncMode.UPLOAD) {
+			uploadLocal(channel, localDir);
+			return;
+		}
+		if (mode == SyncMode.MIRROR) {
 			cleanLocal(channel, localDir);
 		}
 		Vector<LsEntry> files = (Vector<LsEntry>)channel.ls(".");
@@ -92,9 +99,12 @@ public class TransferThread extends Thread {
 				if (localCTime != mTime) {
 					this.fileName = localFile.getName();
 					this.monitor = new ProgressMonitor(totalSize);
+					FileOutputStream fos = null;
 					try {
-						channel.get(file.getFilename(), new FileOutputStream(localFile), monitor);
+						fos = new FileOutputStream(localFile);
+						channel.get(file.getFilename(), fos, monitor);
 					} finally {
+						IOUtils.closeQuietly(fos);
 						if (localFile.exists()) {
 							localFile.setLastModified(mTime);
 							Path path = Paths.get(localFile.toURI());
@@ -105,9 +115,12 @@ public class TransferThread extends Thread {
 				} else if (localFile.length() != totalSize) {
 					this.fileName = localFile.getName();
 					this.monitor = new ProgressMonitor(totalSize);
+					FileOutputStream fos = null;
 					try {
-						channel.get(file.getFilename(), new FileOutputStream(localFile, true), monitor, ChannelSftp.RESUME, len);
+						fos = new FileOutputStream(localFile, true);
+						channel.get(file.getFilename(), fos, monitor, ChannelSftp.RESUME, len);
 					} finally {
+						IOUtils.closeQuietly(fos);
 						localFile.setLastModified(mTime);
 						Path path = Paths.get(localFile.toURI());
 						BasicFileAttributeView att = Files.getFileAttributeView(path, BasicFileAttributeView.class);
@@ -125,6 +138,43 @@ public class TransferThread extends Thread {
 		Path path = Paths.get(file.toURI());
 		BasicFileAttributes att = Files.readAttributes(path, BasicFileAttributes.class);
 		return (int) att.creationTime().to(TimeUnit.SECONDS);
+	}
+
+	private void uploadLocal(ChannelSftp channel, File localDir) throws SftpException, IOException {
+		@SuppressWarnings("unchecked")
+		Vector<LsEntry> files = (Vector<LsEntry>)channel.ls(".");
+		for (File localFile : localDir.listFiles()) {
+			if (localFile.isDirectory()) {
+				uploadLocal(channel, localFile);
+			} else {
+				boolean found = false;
+				boolean exists = false;
+				for (int j = 0; j < files.size(); j++) {
+					LsEntry remoteFile = files.get(j);
+					exists = remoteFile.getFilename().equals(localFile.getName());
+					if (exists && remoteFile.getAttrs().getSize() == localFile.length()) {
+						found = true;
+						break;
+					}
+				}
+				//Not present on remote server, upload
+				if (!found) {
+					this.fileName = localFile.getName();
+					this.monitor = new ProgressMonitor(localFile.length());
+					FileInputStream fis = null;
+					try {
+						fis = new FileInputStream(localFile);
+						channel.put(fis, localFile.getName() + ".temp", monitor);
+					} finally {
+						IOUtils.closeQuietly(fis);
+					}
+					if (exists) {
+						channel.rm(localFile.getName());
+					}
+					channel.rename(localFile.getName() + ".temp", localFile.getName());
+				}
+			}
+		}
 	}
 
 	private void cleanLocal(ChannelSftp channel, File localDir) throws SftpException {
@@ -154,7 +204,8 @@ public class TransferThread extends Thread {
 
 	public String getDescription() {
 		if (monitor != null) {
-			return "Downloading " + fileName + ", " + (100 * monitor.getPercent()) + "%  complete";
+			SyncMode mode = SyncMode.getModeById(entry.getSyncMode());
+			return (mode == SyncMode.UPLOAD ? "Uploading " : "Downloading ") + fileName + ", " + (100 * monitor.getPercent()) + "%  complete";
 		}
 		return "";
 	}
