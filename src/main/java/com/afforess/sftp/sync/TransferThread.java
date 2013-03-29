@@ -152,8 +152,8 @@ public class TransferThread extends Thread {
 				for (int j = 0; j < files.size(); j++) {
 					LsEntry remoteFile = files.get(j);
 					exists = remoteFile.getFilename().equals(localFile.getName());
-					if (exists && remoteFile.getAttrs().getSize() == localFile.length()) {
-						found = true;
+					if (exists) {
+						found = remoteFile.getAttrs().getSize() == localFile.length();
 						break;
 					}
 				}
@@ -164,6 +164,9 @@ public class TransferThread extends Thread {
 					FileInputStream fis = null;
 					try {
 						fis = new FileInputStream(localFile);
+						try {
+							channel.rm(localFile.getName() + ".temp");
+						} catch (SftpException ignore) { }
 						channel.put(fis, localFile.getName() + ".temp", monitor);
 					} finally {
 						IOUtils.closeQuietly(fis);
