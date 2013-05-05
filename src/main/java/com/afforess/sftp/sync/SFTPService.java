@@ -23,6 +23,7 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.ConnectException;
 import java.net.NoRouteToHostException;
+import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -143,34 +144,11 @@ public class SFTPService {
 								continue loop;
 							}
 						}
-						//Open SFTP connection
-						try {
-							JSch jsch = new JSch();
-							Session session = jsch.getSession(entry.getUsername(), entry.getServerHostname(), entry.getPort());
-							session.setPassword(entry.getPassword());
-							java.util.Properties config = new java.util.Properties();
-							config.put("StrictHostKeyChecking", "no");
-							session.setConfig(config);
-							session.connect();
-							ChannelSftp channel = (ChannelSftp) session.openChannel("sftp");
-							channel.connect();
-							channel.cd(entry.getRemoteDir());
-							File localDir = new File(entry.getLocalDir());
-							localDir.mkdirs();
-							TransferThread thread = new TransferThread(entry, channel, localDir);
-							transfers.add(thread);
-							thread.start();
+						if (openSFTPConnection(logger, entry)) {
 							curTransfers++;
 							maxTransfers--;
 							if (maxTransfers <= 0) {
 								break;
-							}
-						} catch (Exception e) {
-							if (e.getCause() instanceof ConnectException || e.getCause() instanceof UnknownHostException || e.getCause() instanceof NoRouteToHostException) {
-								logger.warning("No connection to " + entry.getServerHostname() + ":" + entry.getPort() + ", retry in 60 seconds");
-								fullyTransfered.put(entry, 60);
-							} else {
-								e.printStackTrace();
 							}
 						}
 					}
@@ -196,6 +174,42 @@ public class SFTPService {
 				}
 			}
 		}
+	}
+
+	private static boolean openSFTPConnection(Logger logger, ServerEntry entry) {
+		for (int tries = 3; tries > 0; tries--) {
+			//Open SFTP connection
+			try {
+				JSch jsch = new JSch();
+				Session session = jsch.getSession(entry.getUsername(), entry.getServerHostname(), entry.getPort());
+				session.setPassword(entry.getPassword());
+				java.util.Properties config = new java.util.Properties();
+				config.put("StrictHostKeyChecking", "no");
+				session.setConfig(config);
+				session.connect();
+				ChannelSftp channel = (ChannelSftp) session.openChannel("sftp");
+				channel.connect();
+				channel.cd(entry.getRemoteDir());
+				File localDir = new File(entry.getLocalDir());
+				localDir.mkdirs();
+				TransferThread thread = new TransferThread(entry, channel, localDir);
+				transfers.add(thread);
+				thread.start();
+				return true;
+			} catch (Exception e) {
+				//Bug in JSCH, retry connection anyway
+				if (e.getMessage().toLowerCase().contains("verify: false")) {
+					continue;
+				}
+				if (e.getCause() instanceof ConnectException || e.getCause() instanceof UnknownHostException || e.getCause() instanceof NoRouteToHostException || (e.getCause() instanceof SocketException && e.getCause().getMessage().equalsIgnoreCase("Network is unreachable"))) {
+					logger.warning("No connection to " + entry.getServerHostname() + ":" + entry.getPort() + ", retry in 60 seconds");
+					fullyTransfered.put(entry, 60);
+				} else {
+					e.printStackTrace();
+				}
+			}
+		}
+		return false;
 	}
 
 	public static void addServer(ServerEntry entry) {
