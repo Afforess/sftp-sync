@@ -1,7 +1,6 @@
 package com.afforess.sftp.sync;
 
 import java.awt.AWTException;
-import java.awt.Font;
 import java.awt.Image;
 import java.awt.Menu;
 import java.awt.MenuItem;
@@ -21,21 +20,13 @@ import java.io.InputStream;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.net.ConnectException;
-import java.net.NoRouteToHostException;
-import java.net.SocketException;
-import java.net.UnknownHostException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Formatter;
 import java.util.logging.Handler;
@@ -47,12 +38,7 @@ import java.util.logging.StreamHandler;
 import javax.imageio.ImageIO;
 import javax.swing.UIManager;
 
-import org.apache.bval.jsr303.util.IOUtils;
-
 import com.afforess.sftp.sync.yml.YAMLProcessor;
-import com.jcraft.jsch.ChannelSftp;
-import com.jcraft.jsch.JSch;
-import com.jcraft.jsch.Session;
 
 public class SFTPService {
 	public static final Image DOWNLOADING_IMAGE;
@@ -67,14 +53,11 @@ public class SFTPService {
 			throw new RuntimeException(e);
 		}
 	}
-	private static final Map<ServerEntry, Integer> fullyTransfered = new HashMap<ServerEntry, Integer>();
-	private static final List<TransferThread> transfers = new ArrayList<TransferThread>();
 	private static final List<ServerEntry> servers = new ArrayList<ServerEntry>();
+	private static final List<ServerDaemon> daemons = new ArrayList<ServerDaemon>();
+	private static final AtomicLong pausedTime = new AtomicLong(-1L);
 	private static final PopupMenu popup = new PopupMenu();
-	private static final AtomicInteger maxConnections = new AtomicInteger(2);
-	private static final AtomicInteger prevConnections = new AtomicInteger(2);
-	private static final AtomicLong pauseTime = new AtomicLong(-1L);
-	private static final AtomicBoolean forceRecheck = new AtomicBoolean(false);
+	private static TrayIcon trayIcon;
 	public static void main(String[] args) {
 		Logger logger = setupLogger();
 		try {
@@ -93,214 +76,117 @@ public class SFTPService {
 		}
 
 		loadServers();
-		loadSettings();
 		SystemTray tray = SystemTray.getSystemTray();
 		setupTray();
-		TrayIcon trayIcon = new TrayIcon(DOWNLOADING_IMAGE, "SFTP Sync", popup);
+		trayIcon = new TrayIcon(DOWNLOADING_IMAGE, "SFTP Sync", popup);
 		trayIcon.setImageAutoSize(true);
 		tray.add(trayIcon);
-
-		//Start the dl'ing
+		StringBuilder builder = new StringBuilder("");
 		while(true) {
-			final boolean recheck = forceRecheck.get();
-			int maxTransfers = getMaxConnections();
-			int curTransfers = 0;
-			String tooltip = "SFTP Sync";
-			Iterator<TransferThread> i = transfers.iterator();
-			while(i.hasNext()) {
-				TransferThread thread = i.next();
-				if (thread.isFinished()) {
-					fullyTransfered.put(thread.getServer(), thread.getServer().getRecheckMinutes() * 60);
-					i.remove();
-				} else {
-					//We have too many active transfers, kill some
-					if (maxTransfers <= 0) {
-						thread.interrupt();
-						i.remove();
-					} else {
-						curTransfers++;
-						tooltip += "\n" + thread.getDescription();
-					}
-					maxTransfers--;
-				}
-			}
-			trayIcon.setToolTip(tooltip);
-			//Still have available connections, find another server to check
-			if (maxTransfers > 0) {
-				synchronized(servers) {
-				loop: for (int index = 0; index < servers.size(); index++) {
-						ServerEntry entry = servers.get(index);
-						//Check to see if the recheck period has expired
-						int skips = fullyTransfered.containsKey(entry) ? fullyTransfered.get(entry) : 0;
-						if (forceRecheck.get()) {
-							fullyTransfered.remove(entry);
-						} else if (skips > 0) {
-							fullyTransfered.put(entry, skips - 1);
-							continue;
-						}
-						//Already have an open connection
-						for (TransferThread t : transfers) {
-							if (t.getServer().equals(entry)) {
-								continue loop;
-							}
-						}
-						if (openSFTPConnection(logger, entry)) {
-							curTransfers++;
-							maxTransfers--;
-							if (maxTransfers <= 0) {
-								break;
-							}
-						}
-					}
-				}
-			}
-			if (getMaxConnections() == 0) {
-				trayIcon.setImage(PAUSED_IMAGE);
-			} else if (curTransfers > 0) {
-				trayIcon.setImage(DOWNLOADING_IMAGE);
-			} else {
-				trayIcon.setImage(IDLE_IMAGE);
-			}
-			fileHandler.flush();
-			if (recheck) {
-				forceRecheck.set(false);
-			}
-			Thread.sleep(1000);
-			long pause = pauseTime.get();
-			if (pause > 0) {
-				if (pauseTime.getAndSet(pause - 1000) <= 1000) {
-					maxConnections.set(prevConnections.get());
+			try {
+				Thread.sleep(100);
+				long paused = pausedTime.get();
+				if (paused != -1L && System.currentTimeMillis() > paused) {
+					setTrayIcon(DOWNLOADING_IMAGE);
+					pausedTime.set(-1L);
 					setupTray();
 				}
-			}
-		}
-	}
-
-	private static boolean openSFTPConnection(Logger logger, ServerEntry entry) {
-		for (int tries = 3; tries > 0; tries--) {
-			//Open SFTP connection
-			try {
-				JSch jsch = new JSch();
-				Session session = jsch.getSession(entry.getUsername(), entry.getServerHostname(), entry.getPort());
-				session.setPassword(entry.getPassword());
-				java.util.Properties config = new java.util.Properties();
-				config.put("StrictHostKeyChecking", "no");
-				session.setConfig(config);
-				session.connect();
-				ChannelSftp channel = (ChannelSftp) session.openChannel("sftp");
-				channel.connect();
-				channel.cd(entry.getRemoteDir());
-				File localDir = new File(entry.getLocalDir());
-				localDir.mkdirs();
-				TransferThread thread = new TransferThread(entry, channel, localDir);
-				transfers.add(thread);
-				thread.start();
-				return true;
-			} catch (Exception e) {
-				//Bug in JSCH, retry connection anyway
-				if (e.getMessage().toLowerCase().contains("verify: false")) {
-					continue;
+				builder.delete(0, builder.length());
+				synchronized(SFTPService.class) {
+					boolean first = true;
+					for (TooltipLine line : lines) {
+						String text = line.getTooltip();
+						if (text != null) {
+							if (!first) {
+								builder.append('\n');
+							}
+							first = false;
+							builder.append(text);
+						}
+					}
 				}
-				if (e.getCause() instanceof ConnectException || e.getCause() instanceof UnknownHostException || e.getCause() instanceof NoRouteToHostException || (e.getCause() instanceof SocketException && e.getCause().getMessage().equalsIgnoreCase("Network is unreachable"))) {
-					logger.warning("No connection to " + entry.getServerHostname() + ":" + entry.getPort() + ", retry in 60 seconds");
-					fullyTransfered.put(entry, 60);
+				if (builder.length() == 0) {
+					builder.append("SFTP Sync");
+					setTrayIcon(IDLE_IMAGE);
 				} else {
-					e.printStackTrace();
+					setTrayIcon(DOWNLOADING_IMAGE);
 				}
+				trayIcon.setToolTip(builder.toString());
+			} catch (Exception e) {
+				logger.log(Level.SEVERE, "Unhandled exception", e);
 			}
 		}
-		return false;
 	}
 
-	public static void addServer(ServerEntry entry) {
-		synchronized(servers) {
-			servers.add(entry);
-			saveServers();
-			setupTray();
-		}
+	public static synchronized void setTrayIcon(Image image) {
+		trayIcon.setImage(image);
 	}
 
-	public static void removeServer(ServerEntry entry) {
-		synchronized(servers) {
-			servers.remove(entry);
-			saveServers();
-			setupTray();
-		}
+	public static synchronized void addServer(ServerEntry entry) {
+		servers.add(entry);
+		saveServers();
+		setupTray();
+		addDaemon(entry);
 	}
 
-	public static void updateServer(ServerEntry entry) {
-		synchronized(servers) {
-			saveServers();
-			setupTray();
-		}
-	}
-
-	public static void forceRecheck() {
-		forceRecheck.set(true);
-	}
-
-	private static void loadSettings() {
-		File settingsFile = new File(getWorkingDirectory("sftp-sync"), "settings.properties");
-		if (!settingsFile.exists()) {
-			return;
-		}
-		FileInputStream fis = null;
-		try {
-			Properties settings = new Properties();
-			fis = new FileInputStream(settingsFile);
-			settings.load(fis);
-			if (settings.containsKey("max-connections")) {
-				setMaxConnections(Integer.valueOf((String) settings.get("max-connections")));
-			}
-			if (settings.containsKey("prev-connections")) {
-				prevConnections.set(Integer.valueOf((String) settings.get("prev-connections")));
-			}
-		} catch (IOException e) {
-			e.printStackTrace();
-		} finally {
-			IOUtils.closeQuietly(fis);
-		}
-	}
-
-	private static void saveSettings() {
-		File settingsFile = new File(getWorkingDirectory("sftp-sync"), "settings.properties");
-		if (!settingsFile.exists()) {
-			settingsFile.getParentFile().mkdirs();
-		}
-		FileOutputStream fos = null;
-		try {
-			Properties settings = new Properties();
-			settings.put("max-connections", String.valueOf(getMaxConnections()));
-			settings.put("prev-connections", String.valueOf(prevConnections.get()));
-			fos = new FileOutputStream(settingsFile);
-			settings.store(fos, null);
-		} catch (IOException e) {
-			e.printStackTrace();
-		} finally {
-			IOUtils.closeQuietly(fos);
-		}
-	}
-
-	public static int getMaxConnections() {
-		return maxConnections.get();
-	}
-
-	public static void setMaxConnections(int max) {
-		prevConnections.set(maxConnections.getAndSet(max));
-		saveSettings();
+	public static synchronized void removeServer(ServerEntry entry) {
+		servers.remove(entry);
+		removeDaemon(entry);
+		saveServers();
 		setupTray();
 	}
 
-	public static void setPauseTime(long time) {
-		pauseTime.set(time);
+	public static synchronized void updateServer(ServerEntry entry) {
+		removeDaemon(entry);
+		addDaemon(entry);
+		saveServers();
+		setupTray();
 	}
 
-	private static void setupTray() {
+	private static List<TooltipLine> lines = new ArrayList<TooltipLine>();
+	public static synchronized void addTooltip(TooltipLine line) {
+		lines.add(line);
+	}
+
+	public static synchronized void removeTooltip(TooltipLine line) {
+		lines.remove(line);
+	}
+
+	private static synchronized void addDaemon(ServerEntry entry) {
+		ThreadFactory factory = new NamedThreadFactory("Server [" + entry.getAlias() + "] Daemon - %1");
+		ResumableExecutorService service = new ResumableExecutorService(factory, entry.getSyncMode() == SyncMode.UPLOAD.getMode() ? 2 : Runtime.getRuntime().availableProcessors());
+		ServerDaemon daemon = new ServerDaemon(entry, service);
+		daemons.add(daemon);
+		long paused = pausedTime.get();
+		if (paused != -1L) {
+			daemon.setPaused(paused);
+		}
+		daemon.start();
+	}
+
+	private static synchronized void removeDaemon(ServerEntry entry) {
+		Iterator<ServerDaemon> i = daemons.iterator();
+		while(i.hasNext()) {
+			ServerDaemon daemon = i.next();
+			if (daemon.getAlias().equals(daemon.getAlias())) {
+				i.remove();
+				daemon.shutdown();
+			}
+		}
+	}
+
+	public static synchronized void forceRecheck() {
+		for (ServerDaemon server : daemons) {
+			server.forceUpdate();
+		}
+	}
+
+	private static synchronized void setupTray() {
 		popup.removeAll();
 
-		if (getMaxConnections() == 0) {
+		if (pausedTime.get() != -1L) {
 			MenuItem resume = new MenuItem("Resume");
-			resume.addActionListener(new MaxConnectionsListener(prevConnections.get()));
+			resume.addActionListener(new PauseActionListener(-1L));
 			popup.add(resume);
 		} else {
 			MenuItem recheck = new MenuItem("Force Recheck");
@@ -310,23 +196,23 @@ public class SFTPService {
 			Menu pauseMenu = new Menu("Pause");
 			
 			MenuItem pause = new MenuItem("Pause");
-			pause.addActionListener(new MaxConnectionsListener(0));
+			pause.addActionListener(new PauseActionListener(365 * 24 * 60 * 60 * 1000L));
 			pauseMenu.add(pause);
 			
 			MenuItem pause1 = new MenuItem("Pause - 1 hour");
-			pause1.addActionListener(new MaxConnectionsListener(0, 1 * 60 * 60 * 1000L));
+			pause1.addActionListener(new PauseActionListener(1 * 60 * 60 * 1000L));
 			pauseMenu.add(pause1);
 			
 			MenuItem pause3 = new MenuItem("Pause - 3 hours");
-			pause3.addActionListener(new MaxConnectionsListener(0, 3 * 60 * 60 * 1000L));
+			pause3.addActionListener(new PauseActionListener(3 * 60 * 60 * 1000L));
 			pauseMenu.add(pause3);
 			
 			MenuItem pause6 = new MenuItem("Pause - 6 hours");
-			pause6.addActionListener(new MaxConnectionsListener(0, 6 * 60 * 60 * 1000L));
+			pause6.addActionListener(new PauseActionListener(6 * 60 * 60 * 1000L));
 			pauseMenu.add(pause6);
 			
 			MenuItem pause12 = new MenuItem("Pause - 12 hours");
-			pause12.addActionListener(new MaxConnectionsListener(0, 12 * 60 * 60 * 1000L));
+			pause12.addActionListener(new PauseActionListener(12 * 60 * 60 * 1000L));
 			pauseMenu.add(pause12);
 
 			popup.add(pauseMenu);
@@ -353,22 +239,35 @@ public class SFTPService {
 
 			serverList.add(server);
 		}
-		
-		Menu maxConn = new Menu("Max Connections ");
-		for (int i = 1; i <= 10; i++) {
-			MenuItem amt = new MenuItem(i + (i > 1 ? " Connections" : " Connection"));
-			if (i == getMaxConnections()) {
-				amt.setFont(UIManager.getDefaults().getFont("TabbedPane.font").deriveFont(Font.BOLD | Font.ITALIC));
-			}
-			amt.addActionListener(new MaxConnectionsListener(i));
-			maxConn.add(amt);
-		}
-		
-		popup.add(maxConn);
 
 		MenuItem exit = new MenuItem("Exit");
 		exit.addActionListener(new ExitActionListener());
 		popup.add(exit);
+	}
+
+	private static class PauseActionListener implements ActionListener {
+		final long time;
+		PauseActionListener(long time) {
+			this.time = time;
+		}
+
+		@Override
+		public void actionPerformed(ActionEvent e) {
+			pausedTime.set(System.currentTimeMillis() + time);
+			setupTray();
+			if (time != -1L) {
+				setTrayIcon(PAUSED_IMAGE);
+			} else {
+				setTrayIcon(IDLE_IMAGE);
+			}
+			for (ServerDaemon server : daemons) {
+				if (time != -1L) {
+					server.setPaused(System.currentTimeMillis() + time);
+				} else {
+					server.setPaused(-1L);
+				}
+			}
+		}
 	}
 
 	private static class ExitActionListener implements ActionListener {
@@ -379,54 +278,61 @@ public class SFTPService {
 	}
 
 	private static void saveServers() {
-		File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.yml");
-		YAMLProcessor yml = new YAMLProcessor(serverList, false);
-		
-		List<String> serverAliases = new ArrayList<String>();
-		for (ServerEntry entry : servers) {
-			serverAliases.add(entry.getAlias());
+		synchronized(servers) {
+			File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.yml");
+			YAMLProcessor yml = new YAMLProcessor(serverList, false);
+			
+			List<String> serverAliases = new ArrayList<String>();
+			for (ServerEntry entry : servers) {
+				serverAliases.add(entry.getAlias());
+			}
+			yml.setProperty("servers", serverAliases);
+			for (ServerEntry entry : servers) {
+				final String alias = entry.getAlias();
+				yml.setProperty("server." + alias + ".host", entry.getServerHostname());
+				yml.setProperty("server." + alias + ".port", entry.getPort());
+				yml.setProperty("server." + alias + ".user", entry.getUsername());
+				yml.setProperty("server." + alias + ".pass", entry.getPassword());
+				yml.setProperty("server." + alias + ".remote", entry.getRemoteDir());
+				yml.setProperty("server." + alias + ".local", entry.getLocalDir());
+				yml.setProperty("server." + alias + ".sync", entry.getSyncMode());
+				yml.setProperty("server." + alias + ".cooldown", entry.getRecheckMinutes());
+			}
+			
+			yml.save();
 		}
-		yml.setProperty("servers", serverAliases);
-		for (ServerEntry entry : servers) {
-			final String alias = entry.getAlias();
-			yml.setProperty("server." + alias + ".host", entry.getServerHostname());
-			yml.setProperty("server." + alias + ".port", entry.getPort());
-			yml.setProperty("server." + alias + ".user", entry.getUsername());
-			yml.setProperty("server." + alias + ".pass", entry.getPassword());
-			yml.setProperty("server." + alias + ".remote", entry.getRemoteDir());
-			yml.setProperty("server." + alias + ".local", entry.getLocalDir());
-			yml.setProperty("server." + alias + ".sync", entry.getSyncMode());
-			yml.setProperty("server." + alias + ".cooldown", entry.getRecheckMinutes());
-		}
-		
-		yml.save();
 	}
 
 	private static void loadServers() {
-		File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.yml");
-		YAMLProcessor yml = new YAMLProcessor(serverList, false);
-		try {
-			yml.load();
-			List<String> aliases = yml.getStringList("servers", Collections.<String>emptyList());
-			for (String alias : aliases) {
-				ServerEntry server = new ServerEntry();
-				server.setAlias(alias);
-				server.setServerHostname(yml.getString("server." + alias + ".host"));
-				server.setPort(yml.getInt("server." + alias + ".port"));
-				server.setUsername(yml.getString("server." + alias + ".user"));
-				server.setPassword(yml.getString("server." + alias + ".pass"));
-				server.setRemoteDir(yml.getString("server." + alias + ".remote"));
-				server.setLocalDir(yml.getString("server." + alias + ".local"));
-				if (yml.getBoolean("server." + alias + ".sync") != null) {
-					server.setSyncMode(yml.getBoolean("server." + alias + ".sync") ? 1 : 0);
-				} else {
-					server.setSyncMode(yml.getInt("server." + alias + ".sync", 0));
+		synchronized(servers) {
+			File serverList = new File(getWorkingDirectory("sftp-sync"), "servers.yml");
+			YAMLProcessor yml = new YAMLProcessor(serverList, false);
+			try {
+				yml.load();
+				List<String> aliases = yml.getStringList("servers", Collections.<String>emptyList());
+				for (String alias : aliases) {
+					ServerEntry server = new ServerEntry();
+					server.setAlias(alias);
+					server.setServerHostname(yml.getString("server." + alias + ".host"));
+					server.setPort(yml.getInt("server." + alias + ".port"));
+					server.setUsername(yml.getString("server." + alias + ".user"));
+					server.setPassword(yml.getString("server." + alias + ".pass"));
+					server.setRemoteDir(yml.getString("server." + alias + ".remote"));
+					server.setLocalDir(yml.getString("server." + alias + ".local"));
+					if (yml.getBoolean("server." + alias + ".sync") != null) {
+						server.setSyncMode(yml.getBoolean("server." + alias + ".sync") ? 1 : 0);
+					} else {
+						server.setSyncMode(yml.getInt("server." + alias + ".sync", 0));
+					}
+					server.setRecheckMinutes(yml.getInt("server." + alias + ".cooldown"));
+					servers.add(server);
 				}
-				server.setRecheckMinutes(yml.getInt("server." + alias + ".cooldown"));
-				servers.add(server);
+			} catch (IOException e) {
+				e.printStackTrace();
 			}
-		} catch (IOException e) {
-			e.printStackTrace();
+			for (ServerEntry entry : servers) {
+				addDaemon(entry);
+			}
 		}
 	}
 
@@ -528,7 +434,6 @@ public class SFTPService {
 		MAC_OS,
 		UNKNOWN;
 	}
-
 }
 
 class LoggerOutputStream extends ByteArrayOutputStream {
@@ -581,6 +486,12 @@ class RotatingFileHandler extends StreamHandler {
 			}
 		}
 		super.flush();
+	}
+
+	@Override
+	public void publish(LogRecord record) {
+		super.publish(record);
+		flush();
 	}
 
 	private String calculateFilename() {
