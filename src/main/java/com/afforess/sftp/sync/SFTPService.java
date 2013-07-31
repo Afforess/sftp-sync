@@ -154,8 +154,7 @@ public class SFTPService {
 
 	private static synchronized void addDaemon(ServerEntry entry) {
 		ThreadFactory factory = new NamedThreadFactory("Server [" + entry.getAlias() + "] Daemon - %1");
-		ResumableExecutorService service = new ResumableExecutorService(factory, entry.getSyncMode() == SyncMode.UPLOAD.getMode() ? 2 : Runtime.getRuntime().availableProcessors());
-		ServerDaemon daemon = new ServerDaemon(entry, service);
+		ServerDaemon daemon = new ServerDaemon(entry, factory);
 		daemons.add(daemon);
 		long paused = pausedTime.get();
 		if (paused != -1L) {

@@ -133,8 +133,7 @@ public class SFTPConnection {
 
 	protected boolean isConnected() {
 		try {
-			channel.cd(".");
-			return true;
+			return listFiles(".") != null;
 		} catch (Exception e) {
 			return false;
 		}
