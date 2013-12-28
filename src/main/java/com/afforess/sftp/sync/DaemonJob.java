@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -30,6 +31,7 @@ public class DaemonJob implements Runnable {
 	private final SSHPool pool;
 	private final Set<String> lockedFiles = Sets.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 	private final AtomicInteger activeJobs = new AtomicInteger(0);
+	private final AtomicBoolean shutdown = new AtomicBoolean(false);
 	public DaemonJob(ExecutorService service, ServerEntry server) {
 		this.executor = service;
 		this.server = server;
@@ -46,6 +48,7 @@ public class DaemonJob implements Runnable {
 				}
 			}
 		});
+		this.shutdown.set(true);
 		shutdown.start();
 		try {
 			shutdown.join(10 * 1000L);
@@ -64,10 +67,12 @@ public class DaemonJob implements Runnable {
 		}
 		try {
 			root.run();
-			while (activeJobs.get() > 0) {
+			while (activeJobs.get() > 0 && !this.shutdown.get()) {
 				Thread.sleep(1000L);
 			}
-			executor.shutdown();
+			if (!this.shutdown.get()) {
+				executor.shutdown();
+			}
 		} catch (Exception e) {
 			logger.log(Level.SEVERE, "Unexpected exception", e);
 		} finally {
@@ -92,9 +97,10 @@ public class DaemonJob implements Runnable {
 				throw new IllegalStateException("Local file exists but is not a directory: " + localDirectory.getAbsolutePath());
 			}
 			logger.info("Checking directory [" + directory + "]");
-			SFTPConnection conn = pool.getConnection();
+			SFTPConnection conn = null;
 			try {
 				SFTPService.addTooltip(this);
+				conn = pool.getConnection();
 				List<RemoteFile> files = conn.listFiles(directory);
 				for (RemoteFile file : files) {
 					//Ignore ourselves
@@ -113,10 +119,14 @@ public class DaemonJob implements Runnable {
 						executor.execute(task);
 					}
 				}
+			} catch (Exception e) {
+				if (!Thread.currentThread().isInterrupted()) {
+					logger.log(Level.SEVERE, "Error cloning file: " + directory, e);
+				}
 			} finally {
 				activeJobs.decrementAndGet();
 				SFTPService.removeTooltip(this);
-				conn.close();
+				if (conn != null) conn.close();
 			}
 		}
 
@@ -137,10 +147,11 @@ public class DaemonJob implements Runnable {
 
 		@Override
 		public void run() {
-			SFTPConnection conn = pool.getConnection();
+			SFTPConnection conn = null;
 			logger.info("Checking directory [" + directory + "]");
 			try {
 				SFTPService.addTooltip(this);
+				conn = pool.getConnection();
 				if (conn.getFile(directory) == null) {
 					conn.mkdir(directory);
 				}
@@ -154,10 +165,14 @@ public class DaemonJob implements Runnable {
 					}
 					executor.execute(task);
 				}
+			} catch (Exception e) {
+				if (!Thread.currentThread().isInterrupted()) {
+					logger.log(Level.SEVERE, "Error traversing uploads: " + directory, e);
+				}
 			} finally {
 				activeJobs.decrementAndGet();
 				SFTPService.removeTooltip(this);
-				conn.close();
+				if (conn != null) conn.close();
 			}
 		}
 
@@ -179,8 +194,9 @@ public class DaemonJob implements Runnable {
 
 		@Override
 		public void run() {
-			SFTPConnection conn = pool.getConnection();
+			SFTPConnection conn = null;
 			try {
+				conn = pool.getConnection();
 				file = conn.getFile(path);
 				String localMd5 = md5(localFile);
 				String remoteMd5 = file == null ? null : file.getMD5();
@@ -216,9 +232,13 @@ public class DaemonJob implements Runnable {
 						}
 					}
 				}
-			} finally {
+			} catch (Exception e) {
+				if (!Thread.currentThread().isInterrupted()) {
+					logger.log(Level.SEVERE, "Error uploading file: " + path, e);
+				}
+			}  finally {
 				activeJobs.decrementAndGet();
-				conn.close();
+				if (conn != null) conn.close();
 			}
 		}
 
@@ -247,8 +267,9 @@ public class DaemonJob implements Runnable {
 
 		@Override
 		public void run() {
-			SFTPConnection conn = pool.getConnection();
+			SFTPConnection conn = null;
 			try {
+				conn = pool.getConnection();
 				file = conn.getFile(path);
 				if (file == null) {
 					return; //Moved since we started the task
@@ -277,9 +298,13 @@ public class DaemonJob implements Runnable {
 						}
 					}
 				}
-			} finally {
+			} catch (Exception e) {
+				if (!Thread.currentThread().isInterrupted()) {
+					logger.log(Level.SEVERE, "Error downloading file: " + path, e);
+				}
+			}  finally {
 				activeJobs.decrementAndGet();
-				conn.close();
+				if (conn != null) conn.close();
 			}
 		}
 

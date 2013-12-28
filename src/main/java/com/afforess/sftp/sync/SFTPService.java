@@ -105,7 +105,10 @@ public class SFTPService {
 						}
 					}
 				}
-				if (builder.length() == 0) {
+				if (builder.length() == 0 && pausedTime.get() != -1) {
+					builder.append("SFTP Sync");
+					setTrayIcon(PAUSED_IMAGE);
+				} else if (builder.length() == 0) {
 					builder.append("SFTP Sync");
 					setTrayIcon(IDLE_IMAGE);
 				} else {
@@ -180,14 +183,15 @@ public class SFTPService {
 		}
 	}
 
-	private static synchronized void setupTray() {
+	public static synchronized void setupTray() {
 		popup.removeAll();
 
-		if (pausedTime.get() != -1L) {
+		if (pausedTime.get() != -1L && pausedTime.get() > System.currentTimeMillis()) {
 			MenuItem resume = new MenuItem("Resume");
 			resume.addActionListener(new PauseActionListener(-1L));
 			popup.add(resume);
 		} else {
+			pausedTime.set(-1);
 			MenuItem recheck = new MenuItem("Force Recheck");
 			recheck.addActionListener(new ForceRecheckListener());
 			popup.add(recheck);

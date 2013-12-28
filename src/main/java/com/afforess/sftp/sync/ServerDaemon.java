@@ -53,21 +53,23 @@ public class ServerDaemon extends Thread {
 			if (pausedTime != -1L) {
 				if (System.currentTimeMillis() < pausedTime) {
 					try {
-						Thread.sleep(60000L);
+						Thread.sleep(1000L);
 					} catch (InterruptedException e) { }
 					continue;
 				} else {
 					setPaused(-1L);
+					SFTPService.setupTray();
 				}
 			}
 			final long nextUpdateTime = nextUpdate.get();
 			if (System.currentTimeMillis() > nextUpdateTime && job == null) {
-				job = new DaemonJob(Executors.newFixedThreadPool(server.getSyncMode() == SyncMode.UPLOAD.getMode() ? 2 : Runtime.getRuntime().availableProcessors(), factory), server);
+				job = new DaemonJob(Executors.newFixedThreadPool(server.getSyncMode() == SyncMode.UPLOAD.getMode() ? 2 : Runtime.getRuntime().availableProcessors() * 2, factory), server);
 				job.run();
+				job = null;
 				nextUpdate.compareAndSet(nextUpdateTime, System.currentTimeMillis() + (server.getRecheckMinutes() * 60 * 1000L));
 			}
 			try {
-				Thread.sleep(60000L);
+				Thread.sleep(1000L);
 			} catch (InterruptedException e) { }
 		}
 	}
